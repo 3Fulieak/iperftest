@@ -154,6 +154,20 @@ run_iperf_pair "pair1_${PAIR1_IF_A}_${PAIR1_IF_B}" \
 run_iperf_pair "pair2_${PAIR2_IF_A}_${PAIR2_IF_B}" \
   "$PAIR2_IF_A" "$PAIR2_IP_A" \
   "$PAIR2_IF_B" "$PAIR2_IP_B"
+  
+# 对3: ens2f1 <-> ens5f0
+run_iperf_pair "pair3_${PAIR3_IF_A}_${PAIR3_IF_B}" \
+  "$PAIR3_IF_A" "$PAIR3_IP_A" \
+  "$PAIR3_IF_B" "$PAIR3_IP_B"
 
+# 对4: ens2f1 <-> ens5f0
+run_iperf_pair "pair4_${PAIR4_IF_A}_${PAIR4_IF_B}" \
+  "$PAIR4_IF_A" "$PAIR4_IP_A" \
+  "$PAIR4_IF_B" "$PAIR4_IP_B"
+
+# 对5: ens2f1 <-> ens5f0
+run_iperf_pair "pair5_${PAIR5_IF_A}_${PAIR5_IF_B}" \
+  "$PAIR5_IF_A" "$PAIR5_IP_A" \
+  "$PAIR5_IF_B" "$PAIR5_IP_B"
 echo
 echo "所有测试完成。"
