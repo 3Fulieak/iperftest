@@ -8,23 +8,14 @@ set -uo pipefail
 
 # 批量配置的网口 IP
 declare -A IF_IPS=(
-  # 对1: ens2f0 <-> ens4f1 使用 10.10.1.0/30
   [ens2f0]="10.10.1.1/30"
   [ens4f1]="10.10.1.2/30"
-
-  # 对2: ens2f1 <-> ens5f0 使用 10.10.2.0/30
   [ens2f1]="10.10.2.1/30"
   [ens5f0]="10.10.2.2/30"
-
-  # 对3: ens3f0 <-> ens5f1
   [ens3f0]="10.10.3.1/30"
   [ens5f1]="10.10.3.2/30"
-
-  # 对4: ens3f1 <-> ens6f0
   [ens3f1]="10.10.4.1/30"
   [ens6f0]="10.10.4.2/30"
-
-  # 对5: ens4f0 <-> ens6f1
   [ens4f0]="10.10.5.1/30"
   [ens6f1]="10.10.5.2/30"
 )
@@ -36,41 +27,18 @@ NS_A_IFS=(ens2f0 ens2f1 ens3f0 ens3f1 ens4f0)
 NS_B_IFS=(ens4f1 ens5f0 ens5f1 ens6f0 ens6f1)
 
 # iperf3 参数
-DURATION=10      # 每次测试时长
-PARALLEL=4       # -P
+DURATION=10
+PARALLEL=4
 PROTO="tcp"      # tcp / udp（udp 会加 -u -b 0）
 
-# 对 1: ens2f0 <-> ens4f1
-PAIR1_IF_A="ens2f0"
-PAIR1_IF_B="ens4f1"
-PAIR1_IP_A="10.10.1.1"
-PAIR1_IP_B="10.10.1.2"
+# 各对配置
+PAIR1_IF_A="ens2f0"; PAIR1_IF_B="ens4f1"; PAIR1_IP_A="10.10.1.1"; PAIR1_IP_B="10.10.1.2"
+PAIR2_IF_A="ens2f1"; PAIR2_IF_B="ens5f0"; PAIR2_IP_A="10.10.2.1"; PAIR2_IP_B="10.10.2.2"
+PAIR3_IF_A="ens3f0"; PAIR3_IF_B="ens5f1"; PAIR3_IP_A="10.10.3.1"; PAIR3_IP_B="10.10.3.2"
+PAIR4_IF_A="ens3f1"; PAIR4_IF_B="ens6f0"; PAIR4_IP_A="10.10.4.1"; PAIR4_IP_B="10.10.4.2"
+PAIR5_IF_A="ens4f0"; PAIR5_IF_B="ens6f1"; PAIR5_IP_A="10.10.5.1"; PAIR5_IP_B="10.10.5.2"
 
-# 对 2: ens2f1 <-> ens5f0
-PAIR2_IF_A="ens2f1"
-PAIR2_IF_B="ens5f0"
-PAIR2_IP_A="10.10.2.1"
-PAIR2_IP_B="10.10.2.2"
-
-# 对 3: ens3f0 <-> ens5f1
-PAIR3_IF_A="ens3f0"
-PAIR3_IF_B="ens5f1"
-PAIR3_IP_A="10.10.3.1"
-PAIR3_IP_B="10.10.3.2"
-
-# 对 4: ens3f1 <-> ens6f0
-PAIR4_IF_A="ens3f1"
-PAIR4_IF_B="ens6f0"
-PAIR4_IP_A="10.10.4.1"
-PAIR4_IP_B="10.10.4.2"
-
-# 对 5: ens4f0 <-> ens6f1
-PAIR5_IF_A="ens4f0"
-PAIR5_IF_B="ens6f1"
-PAIR5_IP_A="10.10.5.1"
-PAIR5_IP_B="10.10.5.2"
-
-# 保存每一对的结果：元素形如 "name|OK|9.03 Gbits/sec" 或 "name|FAIL|原因"
+# 保存每一对的结果："name|OK|9.03 Gbits/sec" 或 "name|FAIL|原因"
 PAIR_RESULTS=()
 
 # =============================
@@ -93,15 +61,12 @@ check_iperf() {
 
 create_netns() {
   echo "=== 创建 network namespace ==="
-
-  # 清理旧的
   ip netns del "$NS_A" 2>/dev/null || true
   ip netns del "$NS_B" 2>/dev/null || true
 
   ip netns add "$NS_A"
   ip netns add "$NS_B"
 
-  # 把指定网卡丢进 nsA
   for iface in "${NS_A_IFS[@]}"; do
     if ip link show "$iface" &>/dev/null; then
       echo "  -> 将 $iface 移入 $NS_A"
@@ -112,7 +77,6 @@ create_netns() {
     fi
   done
 
-  # 丢进 nsB
   for iface in "${NS_B_IFS[@]}"; do
     if ip link show "$iface" &>/dev/null; then
       echo "  -> 将 $iface 移入 $NS_B"
@@ -123,14 +87,11 @@ create_netns() {
     fi
   done
 
-  # 把各自 namespace 的 lo 打开
   ip netns exec "$NS_A" ip link set lo up || true
   ip netns exec "$NS_B" ip link set lo up || true
-
   echo "=== namespace 创建完成 ==="
 }
 
-# 判断某个 iface 属于哪个 ns
 get_ns_for_iface() {
   local iface="$1"
   for i in "${NS_A_IFS[@]}"; do
@@ -139,16 +100,15 @@ get_ns_for_iface() {
   for i in "${NS_B_IFS[@]}"; do
     [[ "$i" == "$iface" ]] && { echo "$NS_B"; return; }
   done
-  echo ""  # 不在任何 ns
+  echo ""
 }
 
 config_ips() {
   echo "=== 在各 namespace 中配置 IP ==="
-
   for iface in "${!IF_IPS[@]}"; do
     local ns
     ns=$(get_ns_for_iface "$iface")
-    ip_cidr="${IF_IPS[$iface]}"
+    local ip_cidr="${IF_IPS[$iface]}"
 
     if [[ -z "$ns" ]]; then
       echo "  [警告] $iface 未被分配到任何 namespace，跳过"
@@ -156,36 +116,26 @@ config_ips() {
     fi
 
     echo "  -> [$ns] 配置 $iface = $ip_cidr"
-    # 清旧 IP
     ip netns exec "$ns" ip addr flush dev "$iface" || true
-    # 配新 IP
     ip netns exec "$ns" ip addr add "$ip_cidr" dev "$iface" || true
     ip netns exec "$ns" ip link set "$iface" up || true
   done
-
   echo "=== IP 配置完成 ==="
 }
 
-# 从 iperf3 client 日志里解析最后的速率（如 "9.03 Gbits/sec"）
 extract_rate_from_log() {
   local log_file="$1"
+  local line rate
 
-  # 先尝试找 SUM 行
-  local line
   line=$(grep -E 'SUM.*bits/sec' "$log_file" 2>/dev/null | tail -n1 || true)
-
-  # 找不到 SUM 就找最后一行带 bits/sec 的
   if [[ -z "$line" ]]; then
     line=$(grep -E '[0-9]+\.[0-9]+\s+[KMG]bits/sec' "$log_file" 2>/dev/null | tail -n1 || true)
   fi
-
   if [[ -z "$line" ]]; then
     echo "unknown"
     return
   fi
 
-  # 从这行里提取 "<数值> <单位bits/sec>"
-  local rate
   rate=$(awk '{
     for (i=1; i<=NF; i++) {
       if ($i ~ /^[0-9.]+$/ && $(i+1) ~ /bits\/sec$/) {
@@ -194,44 +144,37 @@ extract_rate_from_log() {
       }
     }
   }' <<<"$line")
-
   [[ -z "$rate" ]] && rate="unknown"
   echo "$rate"
 }
 
 run_iperf_pair() {
   local name="$1"
-  local if_a="$2"
-  local ip_a="$3"
-  local if_b="$4"
-  local ip_b="$5"
+  local if_a="$2" ip_a="$3"
+  local if_b="$4" ip_b="$5"
 
   local ns_a ns_b
   ns_a=$(get_ns_for_iface "$if_a")
   ns_b=$(get_ns_for_iface "$if_b")
 
-  if [[ -z "$ns_a" || -z "$ns_b" ]]; then
-    echo
-    echo "===== 开始测试: $name ====="
-    echo "  [错误] $if_a 或 $if_b 未找到 namespace，跳过此对"
-    PAIR_RESULTS+=("${name}|FAIL|namespace_not_found")
-    return 0
-  fi
-
   echo
   echo "===== 开始测试: $name ====="
+
+  if [[ -z "$ns_a" || -z "$ns_b" ]]; then
+    echo "  [错误] $if_a 或 $if_b 未找到 namespace，跳过此对"
+    PAIR_RESULTS+=("${name}|FAIL|namespace_not_found")
+    return
+  fi
+
   echo "  服务端: $ns_a/$if_a ($ip_a)"
   echo "  客户端: $ns_b/$if_b ($ip_b)"
 
   local proto_args=""
-  if [[ "$PROTO" == "udp" ]]; then
-    proto_args="-u -b 0"
-  fi
+  [[ "$PROTO" == "udp" ]] && proto_args="-u -b 0"
 
   local server_log="iperf3_${name}_server.log"
   local client_log="iperf3_${name}_client.log"
 
-  # 在 ns_a 中启动 iperf3 server
   ip netns exec "$ns_a" iperf3 -s -B "$ip_a" -1 >"$server_log" 2>&1 &
   local server_pid=$!
   echo "  启动服务端 PID=${server_pid}"
@@ -239,13 +182,11 @@ run_iperf_pair() {
   sleep 1
 
   echo "  客户端开始打流..."
-  # pipefail 下，这个管道的返回码是 iperf3 或 tee 中第一个非 0 的
-  set +e
+  # 取管道第一个命令(iperf3)的返回码
   ip netns exec "$ns_b" iperf3 -c "$ip_a" -B "$ip_b" \
-    -t "$DURATION" $proto_args \
+    -P "$PARALLEL" -t "$DURATION" $proto_args \
     | tee "$client_log"
-  local client_rc=$?
-  set -e +o pipefail 2>/dev/null || true   # 防止误开 -e，这里顺便关掉。脚本顶部我们其实没开 -e
+  local client_rc=${PIPESTATUS[0]}
 
   wait "$server_pid"
   local server_rc=$?
