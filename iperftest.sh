@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# 不用 -e，避免某个测试失败导致整个脚本退出
+set -uo pipefail
 
 # =============================
 # 配置区域
@@ -69,6 +70,9 @@ PAIR5_IF_B="ens6f1"
 PAIR5_IP_A="10.10.5.1"
 PAIR5_IP_B="10.10.5.2"
 
+# 保存每一对的结果：元素形如 "name|OK|9.03 Gbits/sec" 或 "name|FAIL|原因"
+PAIR_RESULTS=()
+
 # =============================
 # 工具函数
 # =============================
@@ -101,8 +105,8 @@ create_netns() {
   for iface in "${NS_A_IFS[@]}"; do
     if ip link show "$iface" &>/dev/null; then
       echo "  -> 将 $iface 移入 $NS_A"
-      ip link set "$iface" down
-      ip link set "$iface" netns "$NS_A"
+      ip link set "$iface" down || true
+      ip link set "$iface" netns "$NS_A" || true
     else
       echo "  [警告] $iface 不存在，跳过"
     fi
@@ -112,16 +116,16 @@ create_netns() {
   for iface in "${NS_B_IFS[@]}"; do
     if ip link show "$iface" &>/dev/null; then
       echo "  -> 将 $iface 移入 $NS_B"
-      ip link set "$iface" down
-      ip link set "$iface" netns "$NS_B"
+      ip link set "$iface" down || true
+      ip link set "$iface" netns "$NS_B" || true
     else
       echo "  [警告] $iface 不存在，跳过"
     fi
   done
 
   # 把各自 namespace 的 lo 打开
-  ip netns exec "$NS_A" ip link set lo up
-  ip netns exec "$NS_B" ip link set lo up
+  ip netns exec "$NS_A" ip link set lo up || true
+  ip netns exec "$NS_B" ip link set lo up || true
 
   echo "=== namespace 创建完成 ==="
 }
@@ -153,13 +157,46 @@ config_ips() {
 
     echo "  -> [$ns] 配置 $iface = $ip_cidr"
     # 清旧 IP
-    ip netns exec "$ns" ip addr flush dev "$iface"
+    ip netns exec "$ns" ip addr flush dev "$iface" || true
     # 配新 IP
-    ip netns exec "$ns" ip addr add "$ip_cidr" dev "$iface"
-    ip netns exec "$ns" ip link set "$iface" up
+    ip netns exec "$ns" ip addr add "$ip_cidr" dev "$iface" || true
+    ip netns exec "$ns" ip link set "$iface" up || true
   done
 
   echo "=== IP 配置完成 ==="
+}
+
+# 从 iperf3 client 日志里解析最后的速率（如 "9.03 Gbits/sec"）
+extract_rate_from_log() {
+  local log_file="$1"
+
+  # 先尝试找 SUM 行
+  local line
+  line=$(grep -E 'SUM.*bits/sec' "$log_file" 2>/dev/null | tail -n1 || true)
+
+  # 找不到 SUM 就找最后一行带 bits/sec 的
+  if [[ -z "$line" ]]; then
+    line=$(grep -E '[0-9]+\.[0-9]+\s+[KMG]bits/sec' "$log_file" 2>/dev/null | tail -n1 || true)
+  fi
+
+  if [[ -z "$line" ]]; then
+    echo "unknown"
+    return
+  fi
+
+  # 从这行里提取 "<数值> <单位bits/sec>"
+  local rate
+  rate=$(awk '{
+    for (i=1; i<=NF; i++) {
+      if ($i ~ /^[0-9.]+$/ && $(i+1) ~ /bits\/sec$/) {
+        print $i " " $(i+1);
+        exit
+      }
+    }
+  }' <<<"$line")
+
+  [[ -z "$rate" ]] && rate="unknown"
+  echo "$rate"
 }
 
 run_iperf_pair() {
@@ -169,14 +206,16 @@ run_iperf_pair() {
   local if_b="$4"
   local ip_b="$5"
 
-  # A 端在 nsA，B 端在 nsB（按上面 NS_A_IFS/NS_B_IFS 分）
   local ns_a ns_b
   ns_a=$(get_ns_for_iface "$if_a")
   ns_b=$(get_ns_for_iface "$if_b")
 
   if [[ -z "$ns_a" || -z "$ns_b" ]]; then
-    echo "  [错误] $if_a 或 $if_b 未找到 namespace，跳过 $name"
-    return
+    echo
+    echo "===== 开始测试: $name ====="
+    echo "  [错误] $if_a 或 $if_b 未找到 namespace，跳过此对"
+    PAIR_RESULTS+=("${name}|FAIL|namespace_not_found")
+    return 0
   fi
 
   echo
@@ -189,21 +228,40 @@ run_iperf_pair() {
     proto_args="-u -b 0"
   fi
 
+  local server_log="iperf3_${name}_server.log"
+  local client_log="iperf3_${name}_client.log"
+
   # 在 ns_a 中启动 iperf3 server
-  ip netns exec "$ns_a" iperf3 -s -B "$ip_a" -1 \
-    >"iperf3_${name}_server.log" 2>&1 &
+  ip netns exec "$ns_a" iperf3 -s -B "$ip_a" -1 >"$server_log" 2>&1 &
   local server_pid=$!
   echo "  启动服务端 PID=${server_pid}"
 
   sleep 1
 
   echo "  客户端开始打流..."
+  # pipefail 下，这个管道的返回码是 iperf3 或 tee 中第一个非 0 的
+  set +e
   ip netns exec "$ns_b" iperf3 -c "$ip_a" -B "$ip_b" \
-    -P "$PARALLEL" -t "$DURATION" $proto_args \
-    | tee "iperf3_${name}_client.log"
+    -t "$DURATION" $proto_args \
+    | tee "$client_log"
+  local client_rc=$?
+  set -e +o pipefail 2>/dev/null || true   # 防止误开 -e，这里顺便关掉。脚本顶部我们其实没开 -e
 
-  wait "$server_pid" || true
-  echo "===== 测试完成: $name（日志: iperf3_${name}_*.log） ====="
+  wait "$server_pid"
+  local server_rc=$?
+
+  if (( client_rc == 0 && server_rc == 0 )); then
+    local rate
+    rate=$(extract_rate_from_log "$client_log")
+    echo "  [结果] 成功，速率：$rate"
+    PAIR_RESULTS+=("${name}|OK|${rate}")
+  else
+    local reason="client_rc=${client_rc}, server_rc=${server_rc}"
+    echo "  [结果] 失败，原因：$reason"
+    PAIR_RESULTS+=("${name}|FAIL|${reason}")
+  fi
+
+  echo "===== 测试结束: $name ====="
 }
 
 # =============================
@@ -222,4 +280,13 @@ run_iperf_pair "pair4_${PAIR4_IF_A}_${PAIR4_IF_B}" "$PAIR4_IF_A" "$PAIR4_IP_A" "
 run_iperf_pair "pair5_${PAIR5_IF_A}_${PAIR5_IF_B}" "$PAIR5_IF_A" "$PAIR5_IP_A" "$PAIR5_IF_B" "$PAIR5_IP_B"
 
 echo
-echo "所有测试完成。"
+echo "===================== 测试汇总 ====================="
+for item in "${PAIR_RESULTS[@]}"; do
+  IFS='|' read -r name status info <<<"$item"
+  if [[ "$status" == "OK" ]]; then
+    echo "  ${name}: 成功，速率 = ${info}"
+  else
+    echo "  ${name}: 失败，原因 = ${info}"
+  fi
+done
+echo "===================================================="
